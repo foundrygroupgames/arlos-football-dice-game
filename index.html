@@ -468,7 +468,7 @@ function ratings(t){
   const L=activeFive(t);
   return {
     defence:30+Math.ceil((3*L[0].attrs.gk.value+2*(L[1].attrs.def.value+L[2].attrs.def.value))/3),
-    attack:30+Math.ceil((2*(L[3].attrs.sho.value+L[4].attrs.sho.value)+L[3].attrs.pas.value+L[4].attrs.pas.value)/3),
+    attack:31+Math.ceil((2.5*(L[3].attrs.sho.value+L[4].attrs.sho.value)+L[3].attrs.pas.value+L[4].attrs.pas.value)/3),
     leadership:10+Math.ceil(L.reduce((s,p)=>s+p.attrs.lea.value,0)/2)
   };
 }
@@ -647,6 +647,9 @@ function genMarket(){
    Resolution is in "dice pips": the second roller needs N or more
    on two dice (N clamped 4–10 so there is ALWAYS hope and ALWAYS risk). */
 function homeAdvOf(t){return t.stadium>=5?3:t.stadium>=3?2:1;}
+/* Team-quality gaps count half toward the dice target (rounded up, never to zero).
+   Keeps favourites favoured without letting them win every single roll. */
+function pipGap(x){return Math.sign(x)*Math.ceil(Math.abs(x)/2);}
 function minuteFor(half,n,total){
   return half===1?5+Math.floor((40/Math.max(total,1))*(n-1)):50+Math.floor((40/Math.max(total,1))*(n-1));
 }
@@ -679,7 +682,7 @@ async function runMatch(home,away,opts){
       const sub=rollN(2),subSum=sum(sub);
       let target='';
       if(mine){
-        const n4=clamp(30-lea+subSum,2,13),n5=clamp(40-lea+subSum,2,13);
+        const n4=clamp(28-lea+subSum,2,13),n5=clamp(36-lea+subSum,2,13);
         target='Their dice pull you down by '+subSum+'. '+(n4<=12?'Roll '+n4+'+ for 4 chances'+(n5<=12?' · '+n5+'+ for 5!':'!'):'3 chances are yours — roll for luck!');
       }
       const add=await io.roll({n:2,mine,kind:'talk',who:s.t.name,
@@ -687,7 +690,7 @@ async function runMatch(home,away,opts){
         detail:'Leadership '+lea+' + your two dice − their '+(mine?subSum:'two dice')+'.',
         target});
       const total=lea+sum(add)-subSum;
-      let c=2;if(total>=40)c=5;else if(total>=30)c=4;else if(total>=20)c=3;
+      let c=2;if(total>=36)c=5;else if(total>=28)c=4;else if(total>=18)c=3;
       chances[s.side]=c;
       await io.event({t:'talk',id:s.t.id,name:s.t.name,lea,add:sum(add),sub:subSum,total,ch:c,mine});
     }
@@ -702,6 +705,10 @@ async function runMatch(home,away,opts){
         for(let i=1;i<=st[s.key].lea;i++){
           await doChance(s,2,chances[s.side]+i,chances[s.side]+st[s.key].lea,true);
         }
+      }
+      if(st.hs===0&&st.as===0){
+        await io.event({t:'scramble'});
+        for(const s of sides)await doChance(s,2,9,9,true);
       }
     }
   }
@@ -733,35 +740,37 @@ async function runMatch(home,away,opts){
     await io.event({t:'chance',id:atkT.id,name:atkT.name,dice,total:ct,big:ct>=20,late,mine:mineAtk});
     if(ct<20)return;
     const arBase=ratings(atkT).attack+s.adv;
-    const drBase=ratings(defT).defence+defSide.adv;
+    const drBase=ratings(defT).defence;
     const aSt=st[s.key],dSt=st[s.other];
+    // urgency: a team chasing by 2+ attacks with more heart (-1 to their target);
+    // a team cruising 2+ up finds massed defences (+1)
+    const sdiff=s.side==='home'?st.hs-st.as:st.as-st.hs;
+    const urg=sdiff<=-2?-1:sdiff>=2?1:0;
     let outcome;
     if(mineAtk){
       // defender rolls first (hidden), then YOU shoot at an exact target
       const dDice=rollN(2);
       let dExtra=(dDice[0]===6&&dDice[1]===6)?3:0;
-      const dTot=drBase+sum(dDice)+dExtra;
-      let needed=clamp(dTot+1-arBase,4,10);
+      let needed=clamp(sum(dDice)+dExtra+pipGap(drBase-arBase)+1+urg,4,10);
       const aRes=await io.roll({n:2,mine:true,kind:'shot',boostable:true,who:atkT.name,needed,
         title:'🥅 SHOOT!',
         detail:'Your attack is '+arBase+'. Their keeper is set…'+(dExtra?' and their defence rolled a DOUBLE SIX (Worldie +3)!':''),
-        target:'🎯 Roll '+needed+' or more on two dice to SCORE!'});
+        target:'🎯 Roll '+needed+' or more on two dice to SCORE!'+(urg===-1?' ⚡ You’re chasing — easier target!':urg===1?' 😤 They’ve packed the box!':'')});
       outcome=resolveShot(true,aRes,needed,dExtra>0,aSt,dSt);
     }else if(mineDef){
       // attacker rolls first, then YOU save with an exact target
       const aDice=rollN(2);
       let aExtra=(aDice[0]===6&&aDice[1]===6)?3:0;
-      const aTot=arBase+sum(aDice)+aExtra;
-      let needed=clamp(aTot-drBase,4,10);
+      let needed=clamp(sum(aDice)+aExtra-pipGap(drBase-arBase)-urg,4,10);
       const dRes=await io.roll({n:2,mine:true,kind:'defend',boostable:true,who:defT.name,needed,
         title:'🧤 DEFEND!',
         detail:'Their attack rolled '+sum(aDice)+(aExtra?' — a DOUBLE SIX (Screamer +3)!':'')+'. Your defence is '+drBase+'.',
-        target:'🎯 Roll '+needed+' or more on two dice to SAVE! (Ties save)'});
+        target:'🎯 Roll '+needed+' or more on two dice to SAVE! (Ties save)'+(urg===-1?' ⚡ They’re desperate!':'')});
       outcome=resolveDefend(dRes,needed,aExtra>0,aSt,dSt);
     }else{
       const aDice=rollN(2),dDice=rollN(2);
       const aExtra=(aDice[0]===6&&aDice[1]===6)?3:0;
-      const needed=clamp(arBase+sum(aDice)+aExtra-drBase,4,10);
+      const needed=clamp(sum(aDice)+aExtra-pipGap(drBase-arBase)-urg,4,10);
       const dExtra=(dDice[0]===6&&dDice[1]===6)?3:0;
       let save=sum(dDice)+dExtra>=needed;
       let uas=false,uds=false;
@@ -1244,7 +1253,7 @@ function renderClub(){
       '</div>').join('')+
     '<p class="mini" style="margin-top:8px">🧤 GK makes the saves · 🛡️ DEF block shots · ⚽ ATT score the goals · 🔁 SUB steps in for injuries (🤕) and bans (🟥). Σ = all five skills added up.</p></div>'+
     '<div class="card"><div class="cardhead"><div><div class="eyebrow">Stadium · Level '+S.stadium+'</div><h3>'+STADIUMS[S.stadium-1]+'</h3></div><div class="dots">'+levelDots(S.stadium)+'</div></div>'+
-    '<p class="mini">Home crowd money: 🎲🎲 × '+S.stadium+' × 10. Home advantage: +'+homeAdvOf(t)+' to your rolls at home.</p>'+
+    '<p class="mini">Home crowd money: 🎲🎲 × '+S.stadium+' × 10. Home advantage: +'+homeAdvOf(t)+' to your attacks at home.</p>'+
     (stadCost!==null?'<button class="btn" '+(S.coins>=stadCost?'':'disabled')+' onclick="upgrade(\'stadium\')">Upgrade to '+STADIUMS[S.stadium]+' · 🪙 '+fmt(stadCost)+'</button>':'<p class="mini">⭐ Fully upgraded — what an arena!</p>')+'</div>'+
     '<div class="card"><div class="cardhead"><div><div class="eyebrow">Club shop · Level '+S.shop+'</div><h3>'+SHOPS[S.shop-1]+'</h3></div><div class="dots">'+levelDots(S.shop)+'</div></div>'+
     '<p class="mini">Home shop money: 🎲🎲 × '+S.shop+' × 5.</p>'+
@@ -1320,7 +1329,7 @@ function helpModal(){
     ATTRS.map(a=>'<div class="scoutrow"><span>'+a[1]+' <b>'+ATTRNAMES[a[0]]+'</b></span><span class="mini">'+
       ({gk:'Your GK’s skill powers the defence and makes every save',def:'Your two DEFs power the defence total',pas:'ATT passing powers attack and earns assists',sho:'ATT shooting powers attack and scores goals',lea:'Everyone’s leadership earns match chances'})[a[0]]+'</span></div>').join('')+
     '<p class="mini" style="margin-top:10px"><b>In a match:</b> the game always tells you exactly what to roll — e.g. “Roll 7+ to score”. Six dice, 20+ = big chance. Double six = Screamer/Worldie (+3). ⭐ stars leap in once each when the team is in trouble. The target is never below 4 or above 10, so there is always hope — and always risk!</p>'+
-    '<p class="mini"><b>Home crowd:</b> +1 to +3 on your rolls at home — bigger stadium, bigger boost.</p>'+
+    '<p class="mini"><b>Home crowd:</b> +1 to +3 to your attacks at home — bigger stadium, bigger boost.</p>'+
     '<p class="mini"><b>Boosts:</b> before your roll, pay coins for +2. The price doubles each time in a match.</p>'+
     '<p class="mini"><b>Squad:</b> 6 players — GK, 2 DEF, 2 ATT, SUB. Injuries (🤕) and bans (🟥) happen! The SUB steps in; if two are out, weak youth cover fills the gap.</p>'+
     '<p class="mini"><b>Ages:</b> players improve to 28, fade to 35, then retire and an academy rookie replaces them. Rival clubs sign new players every season too!</p>'+
@@ -1350,7 +1359,7 @@ function renderMatch(){
     '<div class="score" style="font-size:22px;padding-top:14px">vs</div>'+
     '<div class="side"><span class="vbadge">'+away.badge+'</span>'+kitSVG(away.id===S.clubId?S.kits.style:'plain',away.kitColor,30)+'<b>'+esc(away.name)+'</b><span class="chip">💪 '+teamStr(away)+'</span></div>'+
     '</div>'+
-    '<p class="mini center">'+(fx.neutral?'Neutral ground — no home advantage. May the best dice win!':(fx.homeId===S.clubId?'Your crowd is behind you: +'+homeAdvOf(home)+' on your rolls!':'Away day: their crowd gives them +'+homeAdvOf(home)+'. Be brave!'))+'</p>'+
+    '<p class="mini center">'+(fx.neutral?'Neutral ground — no home advantage. May the best dice win!':(fx.homeId===S.clubId?'Your crowd is behind you: +'+homeAdvOf(home)+' to your attacks!':'Away day: their crowd adds +'+homeAdvOf(home)+' to their attacks. Be brave!'))+'</p>'+
     (outs.length?'<p class="mini center">⚠️ Missing: '+outs.map(p=>esc(p.name)+(p.out.type==='injury'?' 🤕':' 🟥')).join(', ')+'</p>':'')+
     '<button class="btn big" onclick="kickOff()">⚽ Kick off!</button>'+
     '<button class="btn ghost slim" onclick="helpModal()">❓ How do matches work?</button></div>';
@@ -1528,7 +1537,7 @@ function addEvent(e,instant){
   const feed=$('#feed');
   if(!feed)return;
   const d=document.createElement('div');
-  if(e.t==='start'){d.className='ev evhalf';d.innerHTML=e.neutral?'🏟️ Neutral ground — no home advantage':'🏟️ '+esc(e.homeName)+'’s crowd: +'+e.adv+' on their rolls';}
+  if(e.t==='start'){d.className='ev evhalf';d.innerHTML=e.neutral?'🏟️ Neutral ground — no home advantage':'🏟️ '+esc(e.homeName)+'’s crowd: +'+e.adv+' to their attacks';}
   else if(e.t==='half'){d.className='ev evhalf';d.innerHTML=e.n===1?'🟢 First half — kick off!':'🔁 Second half';}
   else if(e.t==='talk'){d.className='ev';d.innerHTML='📣 <b>'+esc(e.name)+'</b>: '+e.lea+' +'+e.add+' −'+e.sub+' = '+e.total+' → <b>'+e.ch+' chances</b>';}
   else if(e.t==='chance'){
@@ -1548,6 +1557,7 @@ function addEvent(e,instant){
     }
   }
   else if(e.t==='ft'){d.className='ev evhalf';d.innerHTML='📢 <b>Full time: '+e.score[0]+' – '+e.score[1]+'</b>';}
+  else if(e.t==='scramble'){d.className='ev evbig';d.innerHTML='⏱️ <b>Still 0–0 — stoppage-time scramble!</b> One last chance each!';}
   else if(e.t==='pens'){d.className='ev evbig';d.innerHTML='😱 <b>A draw — PENALTY ROLL-OFF!</b> One die each, highest wins!';}
   else if(e.t==='penroll'){d.className='ev';d.innerHTML='🥅 '+esc(e.homeName)+' '+miniDice([e.h])+' vs '+miniDice([e.a])+' '+esc(e.awayName)+(e.h===e.a?' — level! Again!':'');}
   else if(e.t==='penwin'){d.className='ev evgoal';d.innerHTML='🏆 <b>'+esc(e.name)+' win on penalties!</b>';}
